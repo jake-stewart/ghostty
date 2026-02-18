@@ -628,23 +628,29 @@ pub const RGB = packed struct(u24) {
 
 /// Oklab color space - perceptually uniform for color operations
 /// <https://bottosson.github.io/posts/oklab>
+/// <https://bottosson.github.io/posts/gamutclipping>
+/// <https://bottosson.github.io/posts/colorpicker>
 const OkLab = struct {
     l: f32, // Lightness [0.0, 1.0]
     a: f32, // Green-Red axis [-1.0, 1.0]
     b: f32, // Blue-Yellow axis [-1.0, 1.0]
 
-    pub fn fromRgb(rgb: RGB) OkLab {
-        const r = @as(f32, @floatFromInt(rgb.r)) / 255.0;
-        const g = @as(f32, @floatFromInt(rgb.g)) / 255.0;
-        const b = @as(f32, @floatFromInt(rgb.b)) / 255.0;
+    const k1: f32 = 0.206;
+    const k2: f32 = 0.03;
+    const k3: f32 = (1.0 + k1) / (1.0 + k2);
 
-        const r_lin = if (r <= 0.04045) r / 12.92 else std.math.pow(f32, (r + 0.055) / 1.055, 2.4);
-        const g_lin = if (g <= 0.04045) g / 12.92 else std.math.pow(f32, (g + 0.055) / 1.055, 2.4);
-        const b_lin = if (b <= 0.04045) b / 12.92 else std.math.pow(f32, (b + 0.055) / 1.055, 2.4);
+    fn toe(x: f32) f32 {
+        return 0.5 * (k3 * x - k1 + @sqrt((k3 * x - k1) * (k3 * x - k1) + 4.0 * k2 * k3 * x));
+    }
 
-        const l = 0.4122214708 * r_lin + 0.5363325363 * g_lin + 0.0514459929 * b_lin;
-        const m = 0.2119034982 * r_lin + 0.6806995451 * g_lin + 0.1073969566 * b_lin;
-        const s = 0.0883024619 * r_lin + 0.2817188376 * g_lin + 0.6299787005 * b_lin;
+    fn toeInv(x: f32) f32 {
+        return (x * x + k1 * x) / (k3 * (x + k2));
+    }
+
+    fn linearSrgbToOklab(r: f32, g: f32, b: f32) OkLab {
+        const l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+        const m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+        const s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
 
         const l_ = std.math.cbrt(l);
         const m_ = std.math.cbrt(m);
@@ -657,28 +663,221 @@ const OkLab = struct {
         };
     }
 
-    pub fn toRgb(self: OkLab) RGB {
-        const l_ = self.l + 0.3963377774 * self.a + 0.2158037573 * self.b;
-        const m_ = self.l - 0.1055613458 * self.a - 0.0638541728 * self.b;
-        const s_ = self.l - 0.0894841775 * self.a - 1.2914855480 * self.b;
+    fn oklabToLinearSrgb(L: f32, aa: f32, bb: f32) struct { r: f32, g: f32, b: f32 } {
+        const l_ = L + 0.3963377774 * aa + 0.2158037573 * bb;
+        const m_ = L - 0.1055613458 * aa - 0.0638541728 * bb;
+        const s_ = L - 0.0894841775 * aa - 1.2914855480 * bb;
 
         const l = l_ * l_ * l_;
         const m = m_ * m_ * m_;
         const s = s_ * s_ * s_;
 
-        const r_lin = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
-        const g_lin = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
-        const b_lin = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
-
-        const r = if (r_lin <= 0.0031308) 12.92 * r_lin else 1.055 * std.math.pow(f32, r_lin, 1.0/2.4) - 0.055;
-        const g = if (g_lin <= 0.0031308) 12.92 * g_lin else 1.055 * std.math.pow(f32, g_lin, 1.0/2.4) - 0.055;
-        const b = if (b_lin <= 0.0031308) 12.92 * b_lin else 1.055 * std.math.pow(f32, b_lin, 1.0/2.4) - 0.055;
-
         return .{
-            .r = @as(u8, @intFromFloat(@max(0.0, @min(1.0, r)) * 255.0 + 0.5)),
-            .g = @as(u8, @intFromFloat(@max(0.0, @min(1.0, g)) * 255.0 + 0.5)),
-            .b = @as(u8, @intFromFloat(@max(0.0, @min(1.0, b)) * 255.0 + 0.5)),
+            .r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            .g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            .b = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
         };
+    }
+
+    fn computeMaxSaturation(a_: f32, b_: f32) f32 {
+        const k0, const kk1, const kk2, const kk3, const kk4, const wl, const wm, const ws =
+            if (-1.88170328 * a_ - 0.80936493 * b_ > 1.0)
+                .{
+                    @as(f32, 1.19086277),
+                    @as(f32, 1.76576728),
+                    @as(f32, 0.59662641),
+                    @as(f32, 0.75515197),
+                    @as(f32, 0.56771245),
+                    @as(f32, 4.0767416621),
+                    @as(f32, -3.3077115913),
+                    @as(f32, 0.2309699292)
+                }
+            else if (1.81444104 * a_ - 1.19445276 * b_ > 1.0)
+                .{
+                    @as(f32, 0.73956515),
+                    @as(f32, -0.45954404),
+                    @as(f32, 0.08285427),
+                    @as(f32, 0.12541070),
+                    @as(f32, 0.14503204),
+                    @as(f32, -1.2684380046),
+                    @as(f32, 2.6097574011),
+                    @as(f32, -0.3413193965)
+                }
+            else
+                .{
+                    @as(f32, 1.35733652),
+                    @as(f32, -0.00915799),
+                    @as(f32, -1.15130210),
+                    @as(f32, -0.50559606),
+                    @as(f32, 0.00692167),
+                    @as(f32, -0.0041960863),
+                    @as(f32, -0.7034186147),
+                    @as(f32, 1.7076147010)
+                };
+
+        var S = k0 + kk1 * a_ + kk2 * b_ + kk3 * a_ * a_ + kk4 * a_ * b_;
+
+        const k_l = 0.3963377774 * a_ + 0.2158037573 * b_;
+        const k_m = -0.1055613458 * a_ - 0.0638541728 * b_;
+        const k_s = -0.0894841775 * a_ - 1.2914855480 * b_;
+
+        const l_ = 1.0 + S * k_l;
+        const m_ = 1.0 + S * k_m;
+        const s_ = 1.0 + S * k_s;
+
+        const l = l_ * l_ * l_;
+        const m = m_ * m_ * m_;
+        const s = s_ * s_ * s_;
+
+        const l_dS = 3.0 * k_l * l_ * l_;
+        const m_dS = 3.0 * k_m * m_ * m_;
+        const s_dS = 3.0 * k_s * s_ * s_;
+
+        const l_dS2 = 6.0 * k_l * k_l * l_;
+        const m_dS2 = 6.0 * k_m * k_m * m_;
+        const s_dS2 = 6.0 * k_s * k_s * s_;
+
+        const f = wl * l + wm * m + ws * s;
+        const f1 = wl * l_dS + wm * m_dS + ws * s_dS;
+        const f2 = wl * l_dS2 + wm * m_dS2 + ws * s_dS2;
+
+        S = S - f * f1 / (f1 * f1 - 0.5 * f * f2);
+        return S;
+    }
+
+    fn findCusp(a_: f32, b_: f32) struct { L: f32, C: f32 } {
+        const S_cusp = computeMaxSaturation(a_, b_);
+        const rgb = oklabToLinearSrgb(1.0, S_cusp * a_, S_cusp * b_);
+        const L_cusp = std.math.cbrt(1.0 / @max(@max(rgb.r, rgb.g), @max(rgb.b, 0.0)));
+        return .{ .L = L_cusp, .C = L_cusp * S_cusp };
+    }
+
+    fn findGamutIntersection(a_: f32, b_: f32, L1: f32, C1: f32, L0: f32, cusp_L: f32, cusp_C: f32) f32 {
+        var t: f32 = undefined;
+        if ((L1 - L0) * cusp_C - (cusp_L - L0) * C1 <= 0.0) {
+            t = cusp_C * L0 / (C1 * cusp_L + cusp_C * (L0 - L1));
+        } else {
+            t = cusp_C * (L0 - 1.0) / (C1 * (cusp_L - 1.0) + cusp_C * (L0 - L1));
+
+            const dL = L1 - L0;
+            const dC = C1;
+
+            const kl = 0.3963377774 * a_ + 0.2158037573 * b_;
+            const km = -0.1055613458 * a_ - 0.0638541728 * b_;
+            const ks = -0.0894841775 * a_ - 1.2914855480 * b_;
+
+            const l_dt = dL + dC * kl;
+            const m_dt = dL + dC * km;
+            const s_dt = dL + dC * ks;
+
+            {
+                const L = L0 * (1.0 - t) + t * L1;
+                const C = t * C1;
+
+                const l_ = L + C * kl;
+                const m_ = L + C * km;
+                const s_ = L + C * ks;
+
+                const l = l_ * l_ * l_;
+                const m = m_ * m_ * m_;
+                const s = s_ * s_ * s_;
+
+                const ldt = 3.0 * l_dt * l_ * l_;
+                const mdt = 3.0 * m_dt * m_ * m_;
+                const sdt = 3.0 * s_dt * s_ * s_;
+
+                const ldt2 = 6.0 * l_dt * l_dt * l_;
+                const mdt2 = 6.0 * m_dt * m_dt * m_;
+                const sdt2 = 6.0 * s_dt * s_dt * s_;
+
+                const r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s - 1.0;
+                const r1 = 4.0767416621 * ldt - 3.3077115913 * mdt + 0.2309699292 * sdt;
+                const r2 = 4.0767416621 * ldt2 - 3.3077115913 * mdt2 + 0.2309699292 * sdt2;
+                const u_r = r1 / (r1 * r1 - 0.5 * r * r2);
+                const t_r = if (u_r >= 0.0) -r * u_r else 1.0e5;
+
+                const g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s - 1.0;
+                const g1 = -1.2684380046 * ldt + 2.6097574011 * mdt - 0.3413193965 * sdt;
+                const g2 = -1.2684380046 * ldt2 + 2.6097574011 * mdt2 - 0.3413193965 * sdt2;
+                const u_g = g1 / (g1 * g1 - 0.5 * g * g2);
+                const t_g = if (u_g >= 0.0) -g * u_g else 1.0e5;
+
+                const b2 = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s - 1.0;
+                const b1 = -0.0041960863 * ldt - 0.7034186147 * mdt + 1.7076147010 * sdt;
+                const b22 = -0.0041960863 * ldt2 - 0.7034186147 * mdt2 + 1.7076147010 * sdt2;
+                const u_b = b1 / (b1 * b1 - 0.5 * b2 * b22);
+                const t_b = if (u_b >= 0.0) -b2 * u_b else 1.0e5;
+
+                t += @min(t_r, @min(t_g, t_b));
+            }
+        }
+        return t;
+    }
+
+    fn linearToSrgb(c: f32) f32 {
+        if (c <= 0.0031308) return 12.92 * c;
+        return 1.055 * std.math.pow(f32, c, 1.0 / 2.4) - 0.055;
+    }
+
+    fn srgbToLinear(c: f32) f32 {
+        if (c <= 0.04045) return c / 12.92;
+        return std.math.pow(f32, (c + 0.055) / 1.055, 2.4);
+    }
+
+    fn fromRgbRaw(rgb: RGB) OkLab {
+        const r = @as(f32, @floatFromInt(rgb.r)) / 255.0;
+        const g = @as(f32, @floatFromInt(rgb.g)) / 255.0;
+        const b = @as(f32, @floatFromInt(rgb.b)) / 255.0;
+        return linearSrgbToOklab(srgbToLinear(r), srgbToLinear(g), srgbToLinear(b));
+    }
+
+    fn toRgbRaw(self: OkLab) RGB {
+        const rgb = oklabToLinearSrgb(self.l, self.a, self.b);
+        return .{
+            .r = @intFromFloat(@max(0.0, @min(1.0, linearToSrgb(@max(0.0, rgb.r)))) * 255.0 + 0.5),
+            .g = @intFromFloat(@max(0.0, @min(1.0, linearToSrgb(@max(0.0, rgb.g)))) * 255.0 + 0.5),
+            .b = @intFromFloat(@max(0.0, @min(1.0, linearToSrgb(@max(0.0, rgb.b)))) * 255.0 + 0.5),
+        };
+    }
+
+    /// Oklab with toe-corrected lightness and preserve-chroma gamut clipping.
+    fn fromRgbCorrected(rgb: RGB) OkLab {
+        const lab = fromRgbRaw(rgb);
+        return .{ .l = toe(lab.l), .a = lab.a, .b = lab.b };
+    }
+
+    /// Oklab with toe-corrected lightness and preserve-chroma gamut clipping.
+    fn toRgbCorrected(self: OkLab) RGB {
+        const L = toeInv(@max(0.0, @min(1.0, self.l)));
+        const C = @sqrt(self.a * self.a + self.b * self.b);
+
+        if (C < 1.0e-10) {
+            const rgb = oklabToLinearSrgb(L, 0.0, 0.0);
+            const grey: u8 = @intFromFloat(@max(0.0, @min(1.0, linearToSrgb(@max(0.0, rgb.r)))) * 255.0 + 0.5);
+            return .{ .r = grey, .g = grey, .b = grey };
+        }
+
+        const a_ = self.a / C;
+        const b_ = self.b / C;
+
+        const cusp = findCusp(a_, b_);
+        const t = @min(findGamutIntersection(a_, b_, L, C, L, cusp.L, cusp.C), 1.0);
+        const C_clipped = t * C;
+
+        const rgb = oklabToLinearSrgb(L, C_clipped * a_, C_clipped * b_);
+        return .{
+            .r = @intFromFloat(@max(0.0, @min(1.0, linearToSrgb(@max(0.0, rgb.r)))) * 255.0 + 0.5),
+            .g = @intFromFloat(@max(0.0, @min(1.0, linearToSrgb(@max(0.0, rgb.g)))) * 255.0 + 0.5),
+            .b = @intFromFloat(@max(0.0, @min(1.0, linearToSrgb(@max(0.0, rgb.b)))) * 255.0 + 0.5),
+        };
+    }
+
+    pub fn fromRgb(rgb: RGB) OkLab {
+        return fromRgbCorrected(rgb);
+    }
+
+    pub fn toRgb(self: OkLab) RGB {
+        return self.toRgbCorrected();
     }
 
     pub fn lerp(t: f32, a: OkLab, b: OkLab) OkLab {
@@ -871,21 +1070,21 @@ test "OkLab.fromRgb" {
     try testing.expectApproxEqAbs(@as(f32, 0.0), black.a, epsilon);
     try testing.expectApproxEqAbs(@as(f32, 0.0), black.b, epsilon);
 
-    // Pure red (255, 0, 0) -> l≈0.63, a≈0.22, b≈0.13
+    // Red (255, 0, 0) -> l=0.57, a=0.22, b=0.13
     const red = OkLab.fromRgb(.{ .r = 255, .g = 0, .b = 0 });
-    try testing.expectApproxEqAbs(@as(f32, 0.63), red.l, epsilon);
+    try testing.expectApproxEqAbs(@as(f32, 0.57), red.l, epsilon);
     try testing.expectApproxEqAbs(@as(f32, 0.22), red.a, epsilon);
     try testing.expectApproxEqAbs(@as(f32, 0.13), red.b, epsilon);
 
-    // Pure green (0, 255, 0) -> l≈0.87, a≈-0.23, b≈0.18
+    // Green (0, 255, 0) -> l=0.84, a=-0.23, b=0.18
     const green = OkLab.fromRgb(.{ .r = 0, .g = 255, .b = 0 });
-    try testing.expectApproxEqAbs(@as(f32, 0.87), green.l, epsilon);
+    try testing.expectApproxEqAbs(@as(f32, 0.84), green.l, epsilon);
     try testing.expectApproxEqAbs(@as(f32, -0.23), green.a, epsilon);
     try testing.expectApproxEqAbs(@as(f32, 0.18), green.b, epsilon);
 
-    // Pure blue (0, 0, 255) -> l≈0.45, a≈-0.03, b≈-0.31
+    // Blue (0, 0, 255) -> l=0.37, a=-0.03, b=-0.31
     const blue = OkLab.fromRgb(.{ .r = 0, .g = 0, .b = 255 });
-    try testing.expectApproxEqAbs(@as(f32, 0.45), blue.l, epsilon);
+    try testing.expectApproxEqAbs(@as(f32, 0.37), blue.l, epsilon);
     try testing.expectApproxEqAbs(@as(f32, -0.03), blue.a, epsilon);
     try testing.expectApproxEqAbs(@as(f32, -0.31), blue.b, epsilon);
 }
