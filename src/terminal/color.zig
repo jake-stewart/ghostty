@@ -1070,19 +1070,19 @@ test "OkLab.fromRgb" {
     try testing.expectApproxEqAbs(@as(f32, 0.0), black.a, epsilon);
     try testing.expectApproxEqAbs(@as(f32, 0.0), black.b, epsilon);
 
-    // Red (255, 0, 0) -> l=0.57, a=0.22, b=0.13
+    // Pure red (255, 0, 0) -> l≈0.57, a≈0.22, b≈0.13
     const red = OkLab.fromRgb(.{ .r = 255, .g = 0, .b = 0 });
     try testing.expectApproxEqAbs(@as(f32, 0.57), red.l, epsilon);
     try testing.expectApproxEqAbs(@as(f32, 0.22), red.a, epsilon);
     try testing.expectApproxEqAbs(@as(f32, 0.13), red.b, epsilon);
 
-    // Green (0, 255, 0) -> l=0.84, a=-0.23, b=0.18
+    // Pure green (0, 255, 0) -> l≈0.84, a≈-0.23, b≈0.18
     const green = OkLab.fromRgb(.{ .r = 0, .g = 255, .b = 0 });
     try testing.expectApproxEqAbs(@as(f32, 0.84), green.l, epsilon);
     try testing.expectApproxEqAbs(@as(f32, -0.23), green.a, epsilon);
     try testing.expectApproxEqAbs(@as(f32, 0.18), green.b, epsilon);
 
-    // Blue (0, 0, 255) -> l=0.37, a=-0.03, b=-0.31
+    // Pure blue (0, 0, 255) -> l≈0.37, a≈-0.03, b≈-0.31
     const blue = OkLab.fromRgb(.{ .r = 0, .g = 0, .b = 255 });
     try testing.expectApproxEqAbs(@as(f32, 0.37), blue.l, epsilon);
     try testing.expectApproxEqAbs(@as(f32, -0.03), blue.a, epsilon);
