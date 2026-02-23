@@ -51,11 +51,11 @@ pub const StreamHandler = struct {
     enquiry_response: []const u8,
 
     /// Palette generation parameters, used to regenerate the extended
-    /// palette when foreground/background changes via OSC 10/11.
+    /// palette when foreground/background changes via OSC 4/10/11.
     palette_generate: bool,
     palette_harmonious: bool,
 
-    // When generating the palette, we avoid replacing manually set colors
+    // When generating the palette, we avoid replacing manually set colors.
     config_palette_mask: terminal.color.PaletteMask,
 
     /// The color reporting format for OSC requests.
