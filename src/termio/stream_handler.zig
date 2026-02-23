@@ -54,9 +54,9 @@ pub const StreamHandler = struct {
     /// palette when foreground/background changes via OSC 10/11.
     palette_generate: bool,
     palette_harmonious: bool,
-    palette_base: terminal.color.Palette,
-    palette_mask: terminal.color.PaletteMask,
-    palette_mask_base: terminal.color.PaletteMask,
+
+    // When generating the palette, we avoid replacing manually set colors
+    config_palette_mask: terminal.color.PaletteMask,
 
     /// The color reporting format for OSC requests.
     osc_color_report_format: configpkg.Config.OSCColorReportFormat,
@@ -117,9 +117,7 @@ pub const StreamHandler = struct {
     pub fn changeConfig(self: *StreamHandler, config: *termio.DerivedConfig) void {
         self.palette_generate = config.palette_generate;
         self.palette_harmonious = config.palette_harmonious;
-        self.palette_base = config.palette_base;
-        self.palette_mask = config.palette_mask;
-        self.palette_mask_base = config.palette_mask;
+        self.config_palette_mask = config.config_palette_mask;
         self.osc_color_report_format = config.osc_color_report_format;
         self.clipboard_write = config.clipboard_write;
         self.enquiry_response = config.enquiry_response;
@@ -1214,25 +1212,14 @@ pub const StreamHandler = struct {
         }
     }
 
-    /// Regenerate the extended 256-color palette from the current
-    /// foreground/background colors. Called when OSC 10/11 changes
-    /// the terminal's fg/bg so the palette stays consistent/harmonious.
     fn regeneratePalette(self: *StreamHandler) void {
-        if (!self.palette_generate) return;
-        if (self.palette_mask.findFirstSet() == null) return;
-
-        const bg = self.terminal.colors.background.get() orelse return;
-        const fg = self.terminal.colors.foreground.get() orelse return;
-
-        const new_palette = terminal.color.generate256Color(
-            self.palette_base,
-            self.palette_mask,
-            bg,
-            fg,
+        self.terminal.colors.palette.current = terminal.color.generate256Color(
+            self.terminal.colors.palette.current,
+            self.terminal.colors.palette.mask.unionWith(self.config_palette_mask),
+            self.terminal.colors.background.get() orelse return,
+            self.terminal.colors.foreground.get() orelse return,
             self.palette_harmonious,
         );
-
-        self.terminal.colors.palette.changeDefault(new_palette);
         self.terminal.flags.dirty.palette = true;
     }
 
@@ -1256,6 +1243,11 @@ pub const StreamHandler = struct {
         const writer = response.writer(alloc);
 
         var it = requests.constIterator(0);
+
+        // If FG, BG, or one of the 6 primary/secondary normal colors change,
+        // we should regenerate the 256-color palette.
+        var should_regenerate_palette = false;
+
         while (it.next()) |req| {
             switch (req.*) {
                 .set => |set| {
@@ -1263,16 +1255,16 @@ pub const StreamHandler = struct {
                         .palette => |i| {
                             self.terminal.flags.dirty.palette = true;
                             self.terminal.colors.palette.set(i, set.color);
-                            self.palette_mask.set(i);
+                            should_regenerate_palette |= i > 0 and i < 7;
                         },
                         .dynamic => |dynamic| switch (dynamic) {
                             .foreground => {
                                 self.terminal.colors.foreground.set(set.color);
-                                self.regeneratePalette();
+                                should_regenerate_palette = true;
                             },
                             .background => {
                                 self.terminal.colors.background.set(set.color);
-                                self.regeneratePalette();
+                                should_regenerate_palette = true;
                             },
                             .cursor => self.terminal.colors.cursor.set(set.color),
                             .pointer_foreground,
@@ -1300,9 +1292,7 @@ pub const StreamHandler = struct {
                     .palette => |i| {
                         self.terminal.flags.dirty.palette = true;
                         self.terminal.colors.palette.reset(i);
-                        if (!self.palette_mask_base.isSet(i)) {
-                            self.palette_mask.unset(i);
-                        }
+                        should_regenerate_palette |= i > 0 and i < 7;
 
                         self.surfaceMessageWriter(.{
                             .color_change = .{
@@ -1314,7 +1304,7 @@ pub const StreamHandler = struct {
                     .dynamic => |dynamic| switch (dynamic) {
                         .foreground => {
                             self.terminal.colors.foreground.reset();
-                            self.regeneratePalette();
+                            should_regenerate_palette = true;
 
                             if (self.terminal.colors.foreground.default) |c| {
                                 self.surfaceMessageWriter(.{ .color_change = .{
@@ -1325,7 +1315,7 @@ pub const StreamHandler = struct {
                         },
                         .background => {
                             self.terminal.colors.background.reset();
-                            self.regeneratePalette();
+                            should_regenerate_palette = true;
 
                             if (self.terminal.colors.background.default) |c| {
                                 self.surfaceMessageWriter(.{ .color_change = .{
@@ -1372,7 +1362,7 @@ pub const StreamHandler = struct {
                         });
                     }
                     mask.* = .initEmpty();
-                    self.palette_mask = self.palette_mask_base;
+                    should_regenerate_palette = false;
                 },
 
                 .reset_special => log.warn(
@@ -1461,6 +1451,20 @@ pub const StreamHandler = struct {
 
                     try writer.writeAll(terminator.string());
                 },
+            }
+        }
+
+        if (should_regenerate_palette and self.palette_generate) {
+            self.regeneratePalette();
+            const mask = &self.terminal.colors.palette.mask;
+            var mask_it = mask.iterator(.{ .kind = .unset });
+            while (mask_it.next()) |i| {
+                self.surfaceMessageWriter(.{
+                    .color_change = .{
+                        .target = .{ .palette = @intCast(i) },
+                        .color = self.terminal.colors.palette.current[i],
+                    },
+                });
             }
         }
 
